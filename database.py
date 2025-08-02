@@ -5,6 +5,9 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import sqlalchemy as sa
 from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class DatabaseManager:
     def __init__(self):

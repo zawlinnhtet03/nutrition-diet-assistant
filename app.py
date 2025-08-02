@@ -3,7 +3,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from auth import AuthManager
 from database import DatabaseManager
 from chat_manager import ChatManager
@@ -17,16 +17,30 @@ st.set_page_config(
 )
 
 # Initialize managers
-@st.cache_resource
-def init_managers():
-    auth_manager = AuthManager()
-    db_manager = DatabaseManager()
-    chat_manager = ChatManager()
-    return auth_manager, db_manager, chat_manager
+# @st.cache_resource
+# def init_managers():
+#     auth_manager = AuthManager()
+#     db_manager = DatabaseManager()
+#     chat_manager = ChatManager()
+#     return auth_manager, db_manager, chat_manager
 
-auth_manager, db_manager, chat_manager = init_managers()
+# auth_manager, db_manager, chat_manager = init_managers()
+
+if 'auth_manager' not in st.session_state:
+    st.session_state.auth_manager = AuthManager()
+if 'db_manager' not in st.session_state:
+    st.session_state.db_manager = DatabaseManager()
+if 'chat_manager' not in st.session_state:
+    st.session_state.chat_manager = ChatManager()
+
+auth_manager = st.session_state.auth_manager
+db_manager = st.session_state.db_manager
+chat_manager = st.session_state.chat_manager
+
 
 # Initialize session state
+if 'login_time' not in st.session_state:
+    st.session_state.login_time = None
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'user_data' not in st.session_state:
@@ -37,6 +51,15 @@ if 'current_session_id' not in st.session_state:
     st.session_state.current_session_id = None
 if 'chat_sessions' not in st.session_state:
     st.session_state.chat_sessions = []
+    
+if st.session_state.authenticated and st.session_state.login_time:
+    if datetime.now() - st.session_state.login_time > timedelta(minutes=30):
+        st.session_state.authenticated = False
+        st.session_state.user_data = None
+        st.session_state.login_time = None
+        st.warning("Session expired. Please log in again.")
+        st.stop()
+
 
 # Sidebar for authentication
 with st.sidebar:
@@ -49,13 +72,14 @@ with st.sidebar:
             st.subheader("Login")
             login_email = st.text_input("Email", key="login_email")
             login_password = st.text_input("Password", type="password", key="login_password")
-            
+ 
             if st.button("Login", key="login_btn"):
                 if login_email and login_password:
                     user_data = auth_manager.login(login_email, login_password)
                     if user_data:
                         st.session_state.authenticated = True
                         st.session_state.user_data = user_data
+                        st.session_state.login_time = datetime.now()
                         st.success("Login successful!")
                         st.rerun()
                     else:
@@ -96,14 +120,18 @@ with st.sidebar:
         st.subheader("⚙️ Settings")
         st.info("User preferences and settings will be available here in future updates.")
 
+# st.write("AUTH:", st.session_state.get("authenticated"))
+# st.write("USER:", st.session_state.get("user_data"))
+
+
 # Main app content
 if st.session_state.authenticated:
     # App title
     st.markdown(
         """
         <div style="text-align: center;">
-            <h1>🥗 <b>NutriBench: Smart Nutrition and Diet Assistant</b> 🥗</h1>
-            <p style="font-size: 18px; color: #666;">Your personal nutrition companion powered by AI</p>
+            <h3>🥗 <b>NutriBench: Smart Nutrition and Diet Assistant</b> 🥗</h3>
+            <p style="font-size: 15px; color: #666;">Your personal nutrition companion powered by AI</p>
         </div>
         """, 
         unsafe_allow_html=True
@@ -117,11 +145,11 @@ if st.session_state.authenticated:
     # Tab 1: Ask Anything (ChatGPT-like Interface)
     with tab1:
         # Create two columns for chat sessions and chat interface
-        col1, col2 = st.columns([1, 3])
-        
+        col1, col2 = st.columns([0.6, 3.4], gap="medium")
+
         with col1:
             st.subheader("💬 Chat Sessions")
-            
+
             # New chat button
             if st.button("+ New Chat", type="primary", use_container_width=True):
                 if st.session_state.user_data:
@@ -134,13 +162,13 @@ if st.session_state.authenticated:
                             st.session_state.user_data['id']
                         )
                         st.rerun()
-            
+
             # Load user's chat sessions
             if not st.session_state.chat_sessions and st.session_state.user_data:
                 st.session_state.chat_sessions = chat_manager.get_user_chat_sessions(
                     st.session_state.user_data['id']
                 )
-            
+
             # Display chat sessions
             if st.session_state.chat_sessions:
                 st.write("**Recent Chats:**")
@@ -148,8 +176,8 @@ if st.session_state.authenticated:
                     session_id = session['id']
                     title = session['title']
                     is_current = session_id == st.session_state.current_session_id
-                    
-                    # Session button with styling for current session
+
+                    # Session button with styling
                     button_type = "primary" if is_current else "secondary"
                     if st.button(
                         f"{'🟢 ' if is_current else '💬 '}{title[:25]}" + ("..." if len(title) > 25 else ""),
@@ -159,13 +187,12 @@ if st.session_state.authenticated:
                     ):
                         st.session_state.current_session_id = session_id
                         st.rerun()
-                    
-                    # Show session options for current session
+
+                    # Show edit/delete options
                     if is_current:
                         col_a, col_b = st.columns(2)
                         with col_a:
                             if st.button("✏️", key=f"edit_{session_id}", help="Edit title"):
-                                # Future: Add title editing functionality
                                 pass
                         with col_b:
                             if st.button("🗑️", key=f"delete_{session_id}", help="Delete chat"):
@@ -177,75 +204,59 @@ if st.session_state.authenticated:
                                     st.rerun()
             else:
                 st.info("No chat sessions yet. Start a new chat!")
+
         
-        with col2:
-            st.header("Ask Your Nutrition Questions")
-            
-            # If no current session, prompt to create one
+        with col2:            
+            # --- Header ---
+            st.markdown("""
+                <div style='text-align:center'>
+                    <h4><b>NutriBench AI Chat Assistant</b></h4>
+                    <p style="color:gray;">Ask anything about nutrition, meals, or health goals</p>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # Check if chat session is selected
             if not st.session_state.current_session_id:
                 st.info("👈 Start a new chat session to begin asking questions!")
             else:
-                # Load current chat history
+                # 1. Render chat history ABOVE the input
                 current_messages = chat_manager.get_chat_history(st.session_state.current_session_id)
-                
-                # Display chat history
-                if current_messages:
-                    st.subheader("Chat History")
-                    for idx, message in enumerate(current_messages):
-                        # User message
-                        with st.chat_message("user"):
-                            st.write(message['user_message'])
-                            st.caption(f"📅 {message['created_at'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(message['created_at'], 'strftime') else message['created_at']}")
-                        
-                        # Assistant response
-                        with st.chat_message("assistant"):
-                            st.write(message['assistant_response'])
-                            
-                            # Feedback buttons with unique keys
-                            col_fb1, col_fb2 = st.columns(2)
-                            with col_fb1:
-                                if st.button("👍", key=f"like_{st.session_state.current_session_id}_{idx}", help="Helpful"):
-                                    st.success("Thanks for the feedback!")
-                            with col_fb2:
-                                if st.button("👎", key=f"dislike_{st.session_state.current_session_id}_{idx}", help="Not helpful"):
-                                    st.info("Thanks for the feedback!")
-                
-                # Chat input
-                st.subheader("Ask a Question")
-                user_input = st.text_area(
-                    "Your question:",
-                    placeholder="Ask me anything about nutrition, diet, meal planning...",
-                    height=100
-                )
-                
-                if st.button("Send Message", type="primary", use_container_width=True):
-                    if user_input.strip():
-                        with st.spinner("Generating response..."):
-                            # Generate mock response (placeholder for RAG)
-                            assistant_response = f"Thank you for your question about '{user_input}'. This is a placeholder response. In the full version, this would be powered by a RAG system with nutrition knowledge base providing personalized advice based on your health goals and dietary preferences."
-                            
-                            # Save message to database
-                            success = False
-                            if st.session_state.user_data:
-                                success = chat_manager.add_message_to_chat(
+                for idx, message in enumerate(current_messages):
+                    with st.chat_message("user"):
+                        st.markdown(f"""
+                            <div style="background-color:#e0f7fa;padding:12px;border-radius:10px;">
+                                {message['user_message']}
+                            </div>
+                        """, unsafe_allow_html=True)
+                        st.caption(f"📅 {message['created_at']}")
+
+                    with st.chat_message("assistant"):
+                        st.markdown(f"""
+                            <div style="background-color:#f3f4f6;padding:12px;border-radius:10px;">
+                                {message['assistant_response']}
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                # 2. THEN show input box BELOW
+                with st._bottom:
+                    prompt = st.chat_input("Ask me about the loaded data...")
+                    if prompt:
+                        if st.session_state.user_data:
+                            with st.spinner("Thinking..."):
+                                assistant_response = "Thank you for your question about nutrition. This is a placeholder response for now."
+
+                                chat_manager.add_message_to_chat(
                                     st.session_state.current_session_id,
                                     st.session_state.user_data['id'],
-                                    user_input,
+                                    prompt,
                                     assistant_response
                                 )
-                            
-                            if success:
-                                # Refresh chat sessions to update titles and order
-                                st.session_state.chat_sessions = chat_manager.get_user_chat_sessions(
-                                    st.session_state.user_data['id']
-                                )
-                                st.success("Message sent!")
-                                st.rerun()
-                            else:
-                                st.error("Failed to send message")
-                    else:
-                        st.warning("Please enter a question")
-    
+                                st.rerun()  # To show the updated message list          
+                        else:
+                            st.error("Please log in to start chatting!")
+
+
+
     # Tab 2: Meal Analyzer
     with tab2:
         st.header("🍽 Meal Analyzer")
@@ -463,9 +474,9 @@ else:
     st.markdown(
         """
         <div style="text-align: center; padding: 50px;">
-            <h1>🥗 <b>Welcome to NutriBench</b> 🥗</h1>
-            <h3>Smart Nutrition and Diet Assistant</h3>
-            <p style="font-size: 18px; color: #666; margin: 30px 0;">
+            <h2>🥗 <b>Welcome to NutriBench</b> 🥗</h2>
+            <h4>Smart Nutrition and Diet Assistant</h4>
+            <p style="font-size: 15px; color: #666; margin: 30px 0;">
                 Your personal AI-powered nutrition companion for healthier eating habits
             </p>
         </div>

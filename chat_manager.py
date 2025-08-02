@@ -14,20 +14,22 @@ class ChatManager:
             self.engine = None
     
     def create_new_chat_session(self, user_id: str, title: str = "New Chat", category: Optional[str] = None) -> Optional[str]:
-        """Create a new chat session and return session ID"""
+        """Create a new chat session for a user"""
+        session_id = str(uuid.uuid4())
+        now = datetime.now()
+
         if not self.engine:
-            # Fallback to session state
-            session_id = str(uuid.uuid4())
-            if 'chat_sessions' not in st.session_state:
-                st.session_state.chat_sessions = {}
-            
-            st.session_state.chat_sessions[session_id] = {
-                'id': session_id,
-                'user_id': user_id,
-                'title': title,
-                'category': category,
-                'created_at': datetime.now(),
-                'messages': []
+            if "chat_sessions_all" not in st.session_state:
+                st.session_state.chat_sessions_all = {}
+
+            st.session_state.chat_sessions_all[session_id] = {
+                "user_id": user_id,
+                "title": "Untitled",
+                "category": None,
+                "created_at": now,
+                "updated_at": now,
+                "is_pinned": False,
+                "messages": []
             }
             return session_id
         
@@ -53,18 +55,22 @@ class ChatManager:
             return None
     
     def get_user_chat_sessions(self, user_id: str) -> List[Dict]:
-        """Get all chat sessions for a user"""
+        """Get all chat sessions for a user (for sidebar display)"""
         if not self.engine:
-            # Fallback to session state
-            if 'chat_sessions' not in st.session_state:
-                return []
-            
-            sessions = []
-            for session_id, session_data in st.session_state.chat_sessions.items():
-                if session_data['user_id'] == user_id:
-                    sessions.append(session_data)
-            
-            return sorted(sessions, key=lambda x: x['created_at'], reverse=True)
+            all_sessions = st.session_state.get("chat_sessions_all", {})
+            sessions = [
+                {
+                    'id': sid,
+                    'title': s['title'],
+                    'category': s.get('category'),
+                    'created_at': s['created_at'],
+                    'updated_at': s['updated_at'],
+                    'is_pinned': s.get('is_pinned', False)
+                }
+                for sid, s in all_sessions.items()
+                if s['user_id'] == user_id
+            ]
+            return sorted(sessions, key=lambda x: (not x['is_pinned'], -x['updated_at'].timestamp()))
         
         try:
             with self.engine.connect() as conn:
@@ -95,14 +101,10 @@ class ChatManager:
             return []
     
     def get_chat_history(self, session_id: str) -> List[Dict]:
-        """Get chat history for a specific session"""
+        """Get full chat history from a session"""
         if not self.engine:
-            # Fallback to session state
-            if 'chat_sessions' not in st.session_state:
-                return []
-            
-            session_data = st.session_state.chat_sessions.get(session_id, {})
-            return session_data.get('messages', [])
+            all_sessions = st.session_state.get("chat_sessions_all", {})
+            return all_sessions.get(session_id, {}).get("messages", [])
         
         try:
             with self.engine.connect() as conn:
@@ -132,24 +134,24 @@ class ChatManager:
             return []
     
     def add_message_to_chat(self, session_id: str, user_id: str, user_message: str, assistant_response: str) -> bool:
-        """Add a new message to chat history"""
+        """Add a user+assistant message pair to chat"""
+        now = datetime.now()
+
         if not self.engine:
-            # Fallback to session state
-            if 'chat_sessions' not in st.session_state:
-                st.session_state.chat_sessions = {}
-            
-            if session_id not in st.session_state.chat_sessions:
+            all_sessions = st.session_state.get("chat_sessions_all", {})
+            session = all_sessions.get(session_id)
+
+            if not session or session['user_id'] != user_id:
                 return False
-            
-            message = {
-                'id': str(uuid.uuid4()),
-                'user_message': user_message,
-                'assistant_response': assistant_response,
-                'created_at': datetime.now(),
-                'feedback': None
-            }
-            
-            st.session_state.chat_sessions[session_id]['messages'].append(message)
+
+            session['messages'].append({
+                "id": str(uuid.uuid4()),
+                "user_message": user_message,
+                "assistant_response": assistant_response,
+                "created_at": now,
+                "feedback": None
+            })
+            session['updated_at'] = now
             return True
         
         try:
