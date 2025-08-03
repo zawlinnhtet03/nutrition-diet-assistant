@@ -100,23 +100,42 @@ class ChatManager:
             st.error(f"Failed to load chat sessions: {e}")
             return []
     
-    def get_chat_history(self, session_id: str) -> List[Dict]:
+    def get_chat_history(self, session_id: str, user_id: str = None) -> List[Dict]:
         """Get full chat history from a session"""
         if not self.engine:
             all_sessions = st.session_state.get("chat_sessions_all", {})
-            return all_sessions.get(session_id, {}).get("messages", [])
+            session = all_sessions.get(session_id, {})
+            
+            # Check if session exists and belongs to the user
+            if session and session.get('user_id') == user_id:
+                return session.get("messages", [])
+            else:
+                return []
         
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(
-                    text("""
-                        SELECT user_message, assistant_response, created_at, feedback
-                        FROM chat_history 
-                        WHERE session_id = :session_id 
-                        ORDER BY created_at ASC
-                    """),
-                    {"session_id": session_id}
-                )
+                if user_id:
+                    # With RLS, we need to filter by user_id to ensure proper access
+                    result = conn.execute(
+                        text("""
+                            SELECT user_message, assistant_response, created_at, feedback
+                            FROM chat_history 
+                            WHERE session_id = :session_id AND user_id = :user_id
+                            ORDER BY created_at ASC
+                        """),
+                        {"session_id": session_id, "user_id": user_id}
+                    )
+                else:
+                    # Fallback for backward compatibility
+                    result = conn.execute(
+                        text("""
+                            SELECT user_message, assistant_response, created_at, feedback
+                            FROM chat_history 
+                            WHERE session_id = :session_id 
+                            ORDER BY created_at ASC
+                        """),
+                        {"session_id": session_id}
+                    )
                 
                 messages = []
                 for row in result:

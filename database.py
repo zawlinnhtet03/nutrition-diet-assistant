@@ -121,25 +121,52 @@ class DatabaseManager:
     def get_user_chat_sessions(self, user_id: str) -> List[Dict]:
         """Get all chat sessions for a user"""
         try:
-            chat_history = st.session_state.chat_history
-            user_chats = [chat for chat in chat_history if chat['user_id'] == user_id]
-            
-            # Group by session_id
-            sessions = {}
-            for chat in user_chats:
-                session_id = chat['session_id']
-                if session_id not in sessions:
-                    sessions[session_id] = {
-                        'session_id': session_id,
-                        'created_at': chat['created_at'],
-                        'message_count': 0,
-                        'last_message': ''
-                    }
+            if self.engine:
+                # Use Supabase database
+                with self.engine.connect() as conn:
+                    result = conn.execute(
+                        text("""
+                            SELECT id, title, category, created_at, updated_at, is_pinned
+                            FROM chat_sessions 
+                            WHERE user_id = :user_id 
+                            ORDER BY is_pinned DESC, updated_at DESC
+                        """),
+                        {"user_id": user_id}
+                    )
+                    
+                    sessions = []
+                    for row in result:
+                        sessions.append({
+                            'id': str(row[0]),
+                            'title': row[1],
+                            'category': row[2],
+                            'created_at': row[3],
+                            'updated_at': row[4],
+                            'is_pinned': row[5]
+                        })
+                    
+                    return sessions
+            else:
+                # Fallback to session state
+                chat_history = st.session_state.chat_history
+                user_chats = [chat for chat in chat_history if chat['user_id'] == user_id]
                 
-                sessions[session_id]['message_count'] += 1
-                sessions[session_id]['last_message'] = chat['user_message'][:50] + '...'
-            
-            return list(sessions.values())
+                # Group by session_id
+                sessions = {}
+                for chat in user_chats:
+                    session_id = chat['session_id']
+                    if session_id not in sessions:
+                        sessions[session_id] = {
+                            'session_id': session_id,
+                            'created_at': chat['created_at'],
+                            'message_count': 0,
+                            'last_message': ''
+                        }
+                    
+                    sessions[session_id]['message_count'] += 1
+                    sessions[session_id]['last_message'] = chat['user_message'][:50] + '...'
+                
+                return list(sessions.values())
             
         except Exception as e:
             st.error(f"Error retrieving chat sessions: {str(e)}")

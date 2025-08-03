@@ -77,6 +77,11 @@ with st.sidebar:
                 if login_email and login_password:
                     user_data = auth_manager.login(login_email, login_password)
                     if user_data:
+                        # Clear any existing session data from previous users
+                        st.session_state.chat_sessions = []
+                        st.session_state.current_session_id = None
+                        st.session_state.chat_messages = []
+                        
                         st.session_state.authenticated = True
                         st.session_state.user_data = user_data
                         st.session_state.login_time = datetime.now()
@@ -97,8 +102,8 @@ with st.sidebar:
             
             if st.button("Sign Up", key="signup_btn", type="primary"):
                 if signup_email and signup_password and full_name:
-                    if len(signup_password) < 6:
-                        st.error("Password must be at least 6 characters long")
+                    if len(signup_password) < 8:
+                        st.error("Password must be at least 8 characters long")
                     elif "@" not in signup_email or "." not in signup_email:
                         st.error("Please enter a valid email address")
                     else:
@@ -111,9 +116,15 @@ with st.sidebar:
         user_name = st.session_state.user_data['full_name'] if st.session_state.user_data else 'User'
         st.success(f"Welcome, {user_name}!")
         if st.button("Logout"):
+            # Clear all session state related to the current user
             st.session_state.authenticated = False
             st.session_state.user_data = None
             st.session_state.chat_messages = []
+            st.session_state.chat_sessions = []
+            st.session_state.current_session_id = None
+            st.session_state.login_time = None
+            if hasattr(st.session_state, '_last_user_id'):
+                del st.session_state._last_user_id
             st.rerun()
         
         st.divider()
@@ -122,7 +133,6 @@ with st.sidebar:
 
 # st.write("AUTH:", st.session_state.get("authenticated"))
 # st.write("USER:", st.session_state.get("user_data"))
-
 
 # Main app content
 if st.session_state.authenticated:
@@ -136,7 +146,6 @@ if st.session_state.authenticated:
         """, 
         unsafe_allow_html=True
     )
-    
     st.markdown("---")
     
     # Create tabs
@@ -162,12 +171,26 @@ if st.session_state.authenticated:
                             st.session_state.user_data['id']
                         )
                         st.rerun()
+                        
+            
 
             # Load user's chat sessions
-            if not st.session_state.chat_sessions and st.session_state.user_data:
-                st.session_state.chat_sessions = chat_manager.get_user_chat_sessions(
-                    st.session_state.user_data['id']
-                )
+            if st.session_state.user_data:
+                # Check if we need to reload sessions (either no sessions or user changed)
+                current_user_id = st.session_state.user_data['id']
+                if (not st.session_state.chat_sessions or 
+                    not hasattr(st.session_state, '_last_user_id') or 
+                    st.session_state._last_user_id != current_user_id):
+                    
+                    st.session_state.chat_sessions = chat_manager.get_user_chat_sessions(current_user_id)
+                    st.session_state._last_user_id = current_user_id
+                    
+                    # Debug: Show current user info
+                    # if st.session_state.chat_sessions:
+                    #     # st.info(f"Loaded {len(st.session_state.chat_sessions)} chat sessions for user: {current_user_id}")
+                    #     st.info(f"Loaded messages")  
+                    # else:
+                    #     st.info(f"No chat sessions found for user: {current_user_id}")
 
             # Display chat sessions
             if st.session_state.chat_sessions:
@@ -212,15 +235,28 @@ if st.session_state.authenticated:
                 <div style='text-align:center'>
                     <h4><b>NutriBench AI Chat Assistant</b></h4>
                     <p style="color:gray;">Ask anything about nutrition, meals, or health goals</p>
+                    <br>
                 </div>
             """, unsafe_allow_html=True)
+            
 
             # Check if chat session is selected
             if not st.session_state.current_session_id:
                 st.info("👈 Start a new chat session to begin asking questions!")
             else:
                 # 1. Render chat history ABOVE the input
-                current_messages = chat_manager.get_chat_history(st.session_state.current_session_id)
+                current_messages = chat_manager.get_chat_history(
+                    st.session_state.current_session_id,
+                    st.session_state.user_data['id'] if st.session_state.user_data else None
+                )
+                
+                # Debug: Show chat history info
+                if current_messages:
+                    # st.info(f"Loaded {len(current_messages)} messages for session: {st.session_state.current_session_id}")
+                    # st.info(f"Loaded {len(current_messages)} messages")
+                    st.info("Loaded messages")
+                else:
+                    st.info(f"No messages found for session: {st.session_state.current_session_id}")
                 for idx, message in enumerate(current_messages):
                     with st.chat_message("user"):
                         st.markdown(f"""
