@@ -1,0 +1,21 @@
+app_name: "Gemini RAG for NutriBench"
+
+gemini:
+  llm_model: "models/gemini-1.5-flash"
+  embedding_model: "models/embedding-001"
+
+data_ingestion:
+  document_sources: 
+     - type: "pdf"
+       path: "./data/pdfs/"
+  chunking:
+    chunk_size: 1000
+    chunk_overlap: 200
+  vector_store:
+    type: "chromadb"
+    persist_directory: "./rag/chroma_db"
+    collection_name: "nutribench_rag"
+
+rag:
+  retrieval_k: 5
+  chain_type: "stuff"

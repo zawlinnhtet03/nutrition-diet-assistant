@@ -8,6 +8,44 @@ from auth import AuthManager
 from database import DatabaseManager
 from chat_manager import ChatManager
 from utils import generate_mock_nutrition_data, create_nutrition_charts
+import os
+import sys
+from dotenv import load_dotenv
+import asyncio
+
+# Load .env and set env defaults BEFORE importing any RAG modules
+load_dotenv()
+os.environ.setdefault("USER_AGENT", "NutriBench/0.1 (https://github.com/zawlinnhtet03/nutrition-diet-assistant)")
+# Strongly disable Chroma telemetry at process start
+os.environ.setdefault("CHROMA_TELEMETRY_DISABLED", "1")
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY_IMPLEMENTATION", "noop")
+
+# Make local RAG package importable
+RAG_SRC = os.path.join(os.path.dirname(__file__), "rag", "src")
+if RAG_SRC not in sys.path:
+    sys.path.insert(0, RAG_SRC)
+
+# Ensure an event loop exists in Streamlit's worker thread (fixes: 'There is no current event loop')
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+# Windows-specific: use selector policy for broader compatibility
+if sys.platform.startswith("win") and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# RAG imports (Gemini-based)
+try:
+    from config_loader import load_config
+    from embedding_model import get_gemini_embeddings
+    from llm_model import get_gemini_llm
+    from vector_store import get_chroma_vector_store
+    from rag_chain import build_rag_chain
+except Exception:
+    # Defer import errors to UI when initializing RAG
+    pass
 
 # Page configuration
 st.set_page_config(
@@ -17,15 +55,6 @@ st.set_page_config(
 )
 
 # Initialize managers
-# @st.cache_resource
-# def init_managers():
-#     auth_manager = AuthManager()
-#     db_manager = DatabaseManager()
-#     chat_manager = ChatManager()
-#     return auth_manager, db_manager, chat_manager
-
-# auth_manager, db_manager, chat_manager = init_managers()
-
 if 'auth_manager' not in st.session_state:
     st.session_state.auth_manager = AuthManager()
 if 'db_manager' not in st.session_state:
@@ -36,7 +65,6 @@ if 'chat_manager' not in st.session_state:
 auth_manager = st.session_state.auth_manager
 db_manager = st.session_state.db_manager
 chat_manager = st.session_state.chat_manager
-
 
 # Initialize session state
 if 'login_time' not in st.session_state:
@@ -53,7 +81,15 @@ if 'chat_sessions' not in st.session_state:
     st.session_state.chat_sessions = []
 if 'editing_session_id' not in st.session_state:
     st.session_state.editing_session_id = None
-    
+if 'rag_initialized' not in st.session_state:
+    st.session_state.rag_initialized = False
+if 'qa_chain' not in st.session_state:
+    st.session_state.qa_chain = None
+if 'rag_error' not in st.session_state:
+    st.session_state.rag_error = None
+if 'llm' not in st.session_state:
+    st.session_state.llm = None
+
 if st.session_state.authenticated and st.session_state.login_time:
     if datetime.now() - st.session_state.login_time > timedelta(minutes=30):
         st.session_state.authenticated = False
@@ -61,7 +97,6 @@ if st.session_state.authenticated and st.session_state.login_time:
         st.session_state.login_time = None
         st.warning("Session expired. Please log in again.")
         st.stop()
-
 
 # Sidebar for authentication
 with st.sidebar:
@@ -135,9 +170,6 @@ with st.sidebar:
         st.subheader("⚙️ Settings")
         st.info("User preferences and settings will be available here in future updates.")
 
-# st.write("AUTH:", st.session_state.get("authenticated"))
-# st.write("USER:", st.session_state.get("user_data"))
-
 # Main app content
 if st.session_state.authenticated:
     # App title
@@ -192,10 +224,10 @@ if st.session_state.authenticated:
                     # Debug: Show current user info
                     # if st.session_state.chat_sessions:
                     #     # st.info(f"Loaded {len(st.session_state.chat_sessions)} chat sessions for user: {current_user_id}")
-                    #     st.info(f"Loaded messages")  
+                    #     st.info(f"Loaded {len(st.session_state.chat_sessions)} messages")
                     # else:
                     #     st.info(f"No chat sessions found for user: {current_user_id}")
-
+                    st.info("Loaded messages")
             # Display chat sessions
             if st.session_state.chat_sessions:
                 st.write("**Recent Chats:**")
@@ -283,9 +315,58 @@ if st.session_state.authenticated:
             """, unsafe_allow_html=True)
             
 
+            # Initialize Gemini RAG (once per session)
+            if not st.session_state.rag_initialized and st.session_state.rag_error is None:
+                try:
+                    # Ensure an event loop exists in the current Streamlit run context
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.set_event_loop(asyncio.new_event_loop())
+
+                    cfg_path = os.path.join(os.path.dirname(__file__), 'rag', 'config.yaml')
+                    cfg = load_config(cfg_path)
+                    emb = get_gemini_embeddings(model_name=cfg['gemini']['embedding_model'])
+                    vs = get_chroma_vector_store(
+                        persist_directory=cfg['data_ingestion']['vector_store']['persist_directory'],
+                        collection_name=cfg['data_ingestion']['vector_store']['collection_name'],
+                        embedding_function=emb,
+                    )
+                    retriever = vs.as_retriever(search_kwargs={"k": cfg['rag']['retrieval_k']})
+                    llm = get_gemini_llm(model_name=cfg['gemini']['llm_model'])
+                    st.session_state.qa_chain = build_rag_chain(
+                        llm=llm,
+                        retriever=retriever,
+                        chain_type=cfg['rag']['chain_type'],
+                        return_source_documents=True,
+                    )
+                    # Diagnostics: show collection stats and DB location
+                    try:
+                        collection_count = vs._collection.count()
+                    except Exception:
+                        collection_count = "unknown"
+                    db_path = getattr(vs, "_persist_directory", None) or cfg['data_ingestion']['vector_store']['persist_directory']
+                    st.info(f"Vector store ready. Docs: {collection_count} • DB: {os.path.abspath(db_path)}")
+                    # Store LLM for generic fallback answers when no context is retrieved
+                    st.session_state.llm = llm
+                    st.session_state.rag_initialized = True
+                except Exception as e:
+                    st.session_state.rag_error = str(e)
+
+            if st.session_state.rag_error:
+                st.error(f"RAG initialization failed: {st.session_state.rag_error}")
+                with st.expander("Details / Fix"):
+                    st.write("- Ensure GOOGLE_API_KEY is set in your .env or environment")
+                    st.write("- Ensure ingestion has run to populate the Chroma store")
+                if st.button("↻ Retry RAG init", type="primary"):
+                    st.session_state.rag_error = None
+                    st.session_state.rag_initialized = False
+                    st.session_state.qa_chain = None
+                    st.rerun()
+
             # Check if chat session is selected
             if not st.session_state.current_session_id:
-                st.info("👈 Start a new chat session to begin asking questions!")
+                st.info("Start a new chat session to begin asking questions!")
             else:
                 # 1. Render chat history ABOVE the input
                 current_messages = chat_manager.get_chat_history(
@@ -321,7 +402,46 @@ if st.session_state.authenticated:
                 if prompt:
                     if st.session_state.user_data:
                         with st.spinner("Thinking..."):
-                            assistant_response = "Thank you for your question about nutrition. This is a placeholder response for now."
+                            assistant_response = ""
+                            try:
+                                if st.session_state.qa_chain is None:
+                                    raise RuntimeError("RAG is not initialized. Check your GOOGLE_API_KEY and vector store.")
+                                result = st.session_state.qa_chain.invoke({"query": prompt})
+                                # Default response from RAG
+                                assistant_response = result.get("result") if isinstance(result, dict) else str(result)
+
+                                # If no sources were retrieved, fall back to a general LLM answer
+                                source_docs = []
+                                if isinstance(result, dict):
+                                    source_docs = result.get("source_documents") or []
+
+                                if not source_docs:
+                                    try:
+                                        llm = st.session_state.get("llm")
+                                        if llm is None:
+                                            raise RuntimeError("LLM not available for fallback.")
+                                        # Enforce concise fallback: one short, direct sentence
+                                        brief_prompt = (
+                                            "Answer in ONE short, direct sentence (<=20 words). "
+                                            f"Question: {prompt}"
+                                        )
+                                        generic = llm.invoke(brief_prompt)
+                                        if hasattr(generic, "content") and generic.content:
+                                            assistant_response = generic.content
+                                        else:
+                                            assistant_response = str(generic)
+                                        # Trim to one sentence and cap length for safety
+                                        assistant_response = assistant_response.strip().split("\n")[0]
+                                        if "." in assistant_response:
+                                            assistant_response = assistant_response.split(".")[0] + "."
+                                        assistant_response = assistant_response[:200]
+                                        assistant_response += "\n\n(Note: No relevant documents were found; this is a brief general answer.)"
+                                    except Exception as e_fallback:
+                                        assistant_response = f"RAG returned no sources and fallback failed: {e_fallback}"
+                                if not isinstance(assistant_response, str):
+                                    assistant_response = str(assistant_response)
+                            except Exception as e:
+                                assistant_response = f"RAG error: {e}"
 
                             chat_manager.add_message_to_chat(
                                 st.session_state.current_session_id,
@@ -332,8 +452,6 @@ if st.session_state.authenticated:
                             st.rerun()  # To show the updated message list          
                     else:
                         st.error("Please log in to start chatting!")
-
-
 
     # Tab 2: Meal Analyzer
     with tab2:
@@ -646,8 +764,8 @@ if st.session_state.authenticated:
                         </div>
                     </div>
                 """,
-                    unsafe_allow_html=True,
-                )
+                unsafe_allow_html=True,
+            )
 
             st.markdown("---")
 
