@@ -3,6 +3,27 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import random
+import os
+import json
+from typing import List, Dict, Any, Optional
+
+import httpx
+from dotenv import load_dotenv
+
+# Optional: LLM for ingredient extraction (Mistral)
+try:
+    from mistralai.client import MistralClient
+    from mistralai.models.chat_completion import ChatMessage
+except Exception:  # pragma: no cover
+    MistralClient = None
+    ChatMessage = None
+try:
+    # Older SDK alias
+    from mistralai import Mistral as LegacyMistralClient
+except Exception:  # pragma: no cover
+    LegacyMistralClient = None
+
+load_dotenv()
 
 def generate_mock_nutrition_data():
     """Generate mock nutrition data for dashboard visualization"""
@@ -26,6 +47,28 @@ def generate_mock_nutrition_data():
 def create_nutrition_charts(nutrition_df):
     """Create various nutrition charts for the dashboard"""
     charts = {}
+
+# Minimal known food vocabulary to validate free-text inputs
+KNOWN_FOODS = {
+    # staples
+    "rice","chicken","egg","tofu","potato","pork","salad","bread","noodle","noodles","pasta",
+    "beef","fish","shrimp","prawn","milk","yogurt","banana","apple","avocado","oil","butter","cheese",
+    # vegetables
+    "spinach","broccoli","cabbage","tomato","onion","garlic","okra","carrot","pepper",
+    # SEA/Chinese dishes
+    "mala xiang guo","hot pot","noodle soup","fried rice","fried noodles","laksa","pho","ramen",
+    # Myanmar/local
+    "mohinga","laphet","shan noodles",
+}
+
+def looks_like_meal_text(text: str) -> bool:
+    """Heuristic: require a digit or a known food keyword to proceed."""
+    if not text:
+        return False
+    t = text.lower()
+    if any(ch.isdigit() for ch in t):
+        return True
+    return any(word in t for word in KNOWN_FOODS)
     
     # Daily calories chart
     charts['calories'] = px.line(
@@ -215,3 +258,269 @@ def generate_meal_suggestions(dietary_restrictions, health_goals, cuisine_prefer
         suggestions[meal_type] = filtered_meals[:3]  # Limit to top 3 suggestions
     
     return suggestions
+
+# -----------------------------
+# Meal Analyzer helpers (LLM+USDA)
+# -----------------------------
+# Meal Analyzer helpers (LLM+USDA)
+# -----------------------------
+
+FDC_API_KEY = os.getenv("FDC_API_KEY", "")
+
+_BASIC_GRAM_MAP = {
+    # fallback grams per unit for common items
+    ("egg", "piece"): 50,
+    ("bread", "slice"): 30,
+    ("rice", "cup"): 180,
+    ("rice", "bowl"): 200,
+    ("noodles", "bowl"): 220,
+    ("noodle", "bowl"): 220,
+    ("chicken", "cup"): 140,
+}
+
+def convert_to_grams(quantity: float, unit: str, food_name: str) -> float:
+    unit = (unit or "").lower().strip()
+    name = (food_name or "").lower().strip()
+    if unit in ["g", "gram", "grams"]:
+        return float(quantity)
+    if unit in ["kg", "kilogram", "kilograms"]:
+        return float(quantity) * 1000.0
+    if unit in ["ml"]:
+        # approx: 1 ml ~ 1 g for water-like; best-effort fallback
+        return float(quantity)
+    if unit in ["l", "liter", "litre"]:
+        return float(quantity) * 1000.0
+    if unit in ["cup", "cups"]:
+        # try to use food-specific mapping; default 240g
+        base = 240.0
+        base = _BASIC_GRAM_MAP.get((name, "cup"), base)
+        return float(quantity) * base
+    if unit in ["bowl", "bowls"]:
+        # use food-specific mapping; default 250g
+        base = 250.0
+        base = _BASIC_GRAM_MAP.get((name, "bowl"), base)
+        return float(quantity) * base
+    if unit in ["tbsp", "tablespoon", "tablespoons"]:
+        return float(quantity) * 15.0
+    if unit in ["tsp", "teaspoon", "teaspoons"]:
+        return float(quantity) * 5.0
+    if unit in ["piece", "pieces", "pc"]:
+        base = _BASIC_GRAM_MAP.get((name, "piece"), 50.0)
+        return float(quantity) * base
+    if unit in ["slice", "slices"]:
+        base = _BASIC_GRAM_MAP.get((name, "slice"), 30.0)
+        return float(quantity) * base
+    # default: assume grams
+    return float(quantity)
+
+
+def extract_ingredients_free_text(text: str) -> Dict[str, Any]:
+    """Extract structured ingredients from free text using Mistral.
+    Returns dict: {"items": [{"name","quantity","unit"}], "notes": str}
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"items": [], "notes": ""}
+
+    api_key = os.getenv("MISTRAL_API_KEY") or os.getenv("MISTRALAI_API_KEY") or os.getenv("MISTRAL_TOKEN")
+    model_name = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+    if (MistralClient or LegacyMistralClient) and api_key:
+        try:
+            raw = "{}"
+            if MistralClient is not None:
+                client = MistralClient(api_key=api_key)
+                schema_hint = (
+                    "Return ONLY JSON with this exact shape: "
+                    "{\"items\":[{\"name\":string,\"quantity\":number,\"unit\":string}],\"notes\":string}. "
+                    "items should include only edible foods actually mentioned. "
+                    "Support multi-word dishes, and common units: g, kg, ml, l, cup, bowl, tbsp, tsp, piece, slice. "
+                    "If the unit is a volume/portion (cup/bowl/piece/slice) keep it as provided; do NOT convert to grams. "
+                    "Infer a reasonable quantity when obvious (e.g., '2 eggs' => quantity=2, unit='piece'). "
+                    "If nothing edible is found, return {\"items\":[],\"notes\":\"no_food_found\"}."
+                )
+                prompt = (
+                    "You are a nutrition extraction assistant. "
+                    "Extract foods with quantities/units from the text below.\n\n"
+                    f"TEXT:\n{text}\n\n"
+                    f"{schema_hint}"
+                )
+                resp = client.chat(
+                    model=model_name,
+                    messages=[
+                        ChatMessage(role="system", content="You are a nutrition extraction assistant."),
+                        ChatMessage(role="user", content=prompt),
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                )
+                raw = resp.choices[0].message.content if getattr(resp, "choices", None) else "{}"
+            elif LegacyMistralClient is not None:
+                client = LegacyMistralClient(api_key=api_key)
+                schema_hint = (
+                    "Return ONLY JSON with this exact shape: "
+                    "{\"items\":[{\"name\":string,\"quantity\":number,\"unit\":string}],\"notes\":string}. "
+                    "items should include only edible foods actually mentioned. "
+                    "Support multi-word dishes, and common units: g, kg, ml, l, cup, bowl, tbsp, tsp, piece, slice. "
+                    "If the unit is a volume/portion (cup/bowl/piece/slice) keep it as provided; do NOT convert to grams. "
+                    "Infer a reasonable quantity when obvious (e.g., '2 eggs' => quantity=2, unit='piece'). "
+                    "If nothing edible is found, return {\"items\":[],\"notes\":\"no_food_found\"}."
+                )
+                prompt = (
+                    "You are a nutrition extraction assistant. "
+                    "Extract foods with quantities/units from the text below.\n\n"
+                    f"TEXT:\n{text}\n\n"
+                    f"{schema_hint}"
+                )
+                # Legacy client exposes .chat.complete
+                resp = client.chat.complete(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a nutrition extraction assistant."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                )
+                raw = resp.choices[0].message.content if getattr(resp, "choices", None) else "{}"
+            data = json.loads(raw)
+            items = data.get("items", []) if isinstance(data, dict) else []
+            # sanitize
+            cleaned = []
+            for it in items:
+                name = str(it.get("name", "")).strip()
+                try:
+                    qty = float(it.get("quantity", 0))
+                except Exception:
+                    qty = 0.0
+                unit = str(it.get("unit", "g")).strip() or "g"
+                if name and qty > 0:
+                    cleaned.append({"name": name, "quantity": qty, "unit": unit})
+            return {"items": cleaned, "notes": data.get("notes", "")}
+        except Exception:
+            return {"items": [], "notes": "llm_error"}
+
+    # No Mistral available
+    return {"items": [], "notes": "llm_unavailable"}
+
+def _fdc_search(name: str) -> Dict[str, Any]:
+    if not FDC_API_KEY:
+        return {}
+    try:
+        r = httpx.get(
+            "https://api.nal.usda.gov/fdc/v1/foods/search",
+            params={
+                "api_key": FDC_API_KEY,
+                "query": name,
+                "pageSize": 5,
+                # prefer more standardized sources first
+                "dataType": ["Survey (FNDDS)", "SR Legacy", "Branded"],
+            },
+            timeout=10.0,
+        )
+        data = r.json() or {}
+        foods = data.get("foods") or []
+        if not foods:
+            return {}
+        # Choose the highest score; fall back to first
+        best = max(foods, key=lambda f: float(f.get("score", 0)))
+        return best
+    except Exception:
+        return {}
+
+
+def _extract_per100g(food: Dict[str, Any]) -> Dict[str, float]:
+    # Map using FDC nutrientNumbers for stability
+    # 1008=Energy(kcal), 1003=Protein(g), 1004=Total lipid (fat)(g), 1005=Carbohydrate(g),
+    # 1079=Fiber(g), 2000=Sugars total(g), 1093=Sodium(mg)
+    targets = {
+        "1008": ("calories", 0.0),
+        "1003": ("protein_g", 0.0),
+        "1004": ("fat_g", 0.0),
+        "1005": ("carbs_g", 0.0),
+        "1079": ("fiber_g", 0.0),
+        "2000": ("sugar_g", 0.0),
+        "1093": ("sodium_mg", 0.0),
+    }
+    nutrients = {k: v for k, v in [
+        ("calories", 0.0), ("protein_g", 0.0), ("carbs_g", 0.0), ("fat_g", 0.0), ("fiber_g", 0.0), ("sugar_g", 0.0), ("sodium_mg", 0.0)
+    ]}
+    if not food:
+        return nutrients
+    for n in (food.get("foodNutrients") or []):
+        num = str(n.get("nutrientNumber") or "").strip()
+        val = n.get("value")
+        try:
+            val_f = float(val)
+        except Exception:
+            val_f = 0.0
+        if num in targets:
+            key, _ = targets[num]
+            nutrients[key] = val_f
+        else:
+            # Name-based fallbacks if nutrientNumber absent
+            name = (n.get("nutrientName") or "").lower()
+            if ("energy" in name or name == "calories") and nutrients["calories"] == 0.0:
+                nutrients["calories"] = val_f
+            elif ("protein" in name) and nutrients["protein_g"] == 0.0:
+                nutrients["protein_g"] = val_f
+            elif (("total lipid" in name) or ("total fat" in name) or (" fat" in name)) and ("saturated" not in name) and nutrients["fat_g"] == 0.0:
+                nutrients["fat_g"] = val_f
+            elif ("carbohydrate" in name) and nutrients["carbs_g"] == 0.0:
+                nutrients["carbs_g"] = val_f
+            elif ("fiber" in name) and nutrients["fiber_g"] == 0.0:
+                nutrients["fiber_g"] = val_f
+            elif (("sugars" in name) or name == "sugar") and nutrients["sugar_g"] == 0.0:
+                nutrients["sugar_g"] = val_f
+            elif ("sodium" in name) and nutrients["sodium_mg"] == 0.0:
+                nutrients["sodium_mg"] = val_f
+    return nutrients
+
+
+def _rough_local_lookup(item: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    # very rough fallback table per 100g
+    name = (item.get("name") or "").lower()
+    table = {
+        "rice": {"calories": 130, "protein_g": 2.7, "carbs_g": 28, "fat_g": 0.3, "fiber_g": 0.4, "sugar_g": 0},
+        "chicken": {"calories": 165, "protein_g": 31, "carbs_g": 0, "fat_g": 3.6, "fiber_g": 0, "sugar_g": 0},
+        "egg": {"calories": 143, "protein_g": 13, "carbs_g": 1.1, "fat_g": 9.5, "fiber_g": 0, "sugar_g": 1.1},
+        "tofu": {"calories": 76, "protein_g": 8, "carbs_g": 1.9, "fat_g": 4.8, "fiber_g": 0.3, "sugar_g": 0.6},
+        "potato": {"calories": 77, "protein_g": 2, "carbs_g": 17, "fat_g": 0.1, "fiber_g": 2.2, "sugar_g": 0.8},
+        "pork": {"calories": 242, "protein_g": 27, "carbs_g": 0, "fat_g": 14, "fiber_g": 0, "sugar_g": 0},
+        "salad": {"calories": 20, "protein_g": 1.5, "carbs_g": 3.5, "fat_g": 0.2, "fiber_g": 1.8, "sugar_g": 1.5},
+        "noodles": {"calories": 138, "protein_g": 5.0, "carbs_g": 25.0, "fat_g": 2.5, "fiber_g": 1.2, "sugar_g": 0.8},
+        "mala xiang guo": {"calories": 200, "protein_g": 8.0, "carbs_g": 8.0, "fat_g": 14.0, "fiber_g": 1.5, "sugar_g": 2.0},
+    }
+    base = table.get(name)
+    if not base:
+        # try startswith match
+        for k, v in table.items():
+            if name.startswith(k):
+                base = v
+                break
+    if not base:
+        # Unknown in our small table
+        return None
+    grams = convert_to_grams(item.get("quantity", 100), item.get("unit", "g"), item.get("name", ""))
+    factor = grams / 100.0
+    return {k: round(v * factor, 2) for k, v in base.items()} | {"sodium_mg": 0.0}
+
+
+def compute_nutrition(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    totals = {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0, "fiber_g": 0.0, "sugar_g": 0.0, "sodium_mg": 0.0}
+    details = []
+    if not FDC_API_KEY:
+        return {"totals": totals, "details": details, "notes": "fdc_unavailable"}
+    for it in items:
+        food = _fdc_search(it.get("name", ""))
+        if not food:
+            continue
+        per100 = _extract_per100g(food)
+        grams = convert_to_grams(it.get("quantity", 100), it.get("unit", "g"), it.get("name", ""))
+        factor = grams / 100.0
+        nutrients = {k: round(v * factor, 2) for k, v in per100.items()}
+        fdc_id = food.get("fdcId")
+        for k in totals:
+            totals[k] += nutrients.get(k, 0.0)
+        details.append({"item": it, "nutrients": nutrients, "fdcId": fdc_id})
+    totals = {k: round(v, 2) for k, v in totals.items()}
+    return {"totals": totals, "details": details}

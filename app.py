@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 from auth import AuthManager
 from database import DatabaseManager
 from chat_manager import ChatManager
-from utils import generate_mock_nutrition_data, create_nutrition_charts
+from utils import (
+    generate_mock_nutrition_data,
+    create_nutrition_charts,
+    extract_ingredients_free_text,
+    compute_nutrition,
+)
 import os
 import sys
 from dotenv import load_dotenv
@@ -20,6 +25,9 @@ os.environ.setdefault("USER_AGENT", "NutriBench/0.1 (https://github.com/zawlinnh
 os.environ.setdefault("CHROMA_TELEMETRY_DISABLED", "1")
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 os.environ.setdefault("CHROMA_TELEMETRY_IMPLEMENTATION", "noop")
+
+# Import Mistral-based planner AFTER env is loaded
+from test import get_plan_json
 
 # Make local RAG package importable
 RAG_SRC = os.path.join(os.path.dirname(__file__), "rag", "src")
@@ -64,6 +72,10 @@ if 'chat_manager' not in st.session_state:
 
 auth_manager = st.session_state.auth_manager
 db_manager = st.session_state.db_manager
+# If code changed and the cached instance lacks new methods, refresh it
+if not hasattr(db_manager, 'save_user_preferences'):
+    st.session_state.db_manager = DatabaseManager()
+    db_manager = st.session_state.db_manager
 chat_manager = st.session_state.chat_manager
 
 # Initialize session state
@@ -185,7 +197,7 @@ if st.session_state.authenticated:
     st.markdown("---")
     
     # Create tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧠 Ask Anything", "🍽 Meal Analyzer", "📊 Nutrition Dashboard", "📝 Export Report", "🎙️ Talk to Me"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🧠 Ask Anything", "Nutrition Plan", "🍽 Meal Analyzer", "📊 Nutrition Dashboard", "📝 Export Report", "🎙️ Talk to Me"])
     
     # Tab 1: Ask Anything (ChatGPT-like Interface)
     with tab1:
@@ -208,8 +220,6 @@ if st.session_state.authenticated:
                         )
                         st.rerun()
                         
-            
-
             # Load user's chat sessions
             if st.session_state.user_data:
                 # Check if we need to reload sessions (either no sessions or user changed)
@@ -388,7 +398,7 @@ if st.session_state.authenticated:
                                 {message['user_message']}
                             </div>
                         """, unsafe_allow_html=True)
-                        st.caption(f"📅 {message['created_at']}")
+                        # st.caption(f"📅 {message['created_at']}")
 
                     with st.chat_message("assistant"):
                         st.markdown(f"""
@@ -453,99 +463,299 @@ if st.session_state.authenticated:
                     else:
                         st.error("Please log in to start chatting!")
 
-    # Tab 2: Meal Analyzer
+    # Tab 2: AI Nutrition Plan (moved here)
     with tab2:
+        st.header("🧠 AI Nutrition Plan")
+        st.markdown("Fill in your details to generate a personalized daily nutrition plan.")
+
+        # Section: Personal Info
+        st.markdown("### 👤 Personal Information")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            age = st.number_input("Age", min_value=10, max_value=100, value=25, key="plan_age")
+        with c2:
+            gender = st.selectbox("Gender", ["Male", "Female", "Other"], key="plan_gender")
+        with c3:
+            height = st.number_input("Height (cm)", min_value=120, max_value=220, value=170, key="plan_height")
+        with c4:
+            weight = st.number_input("Weight (kg)", min_value=35.0, max_value=250.0, value=70.0, step=0.1, key="plan_weight")
+
+        bmi_val = round(weight/((height/100)**2), 1) if height else ""
+        st.caption(f"Computed BMI: {bmi_val}")
+
+        # Section: Lifestyle
+        st.markdown("### 🏃 Lifestyle")
+        l1, l2, l3 = st.columns(3)
+        with l1:
+            activity_level_plan = st.selectbox(
+                "Activity Level",
+                ["Sedentary", "Lightly Active", "Moderately Active", "Very Active", "Extremely Active"],
+                key="plan_activity_level",
+            )
+        with l2:
+            steps = st.number_input("Daily Steps", min_value=0, value=5000, step=500, key="plan_steps")
+        with l3:
+            sleep_hours = st.number_input("Sleep Hours", min_value=0.0, max_value=24.0, value=7.0, step=0.5, key="plan_sleep")
+
+        # Section: Goals
+        st.markdown("### 🎯 Goals")
+        g1, = st.columns(1)
+        with g1:
+            health_goal_plan = st.selectbox(
+                "Primary Goal",
+                ["Weight Loss", "Weight Gain", "Muscle Gain", "Maintenance", "General Health"],
+                key="plan_goal",
+            )
+
+        # Section: Preferences
+        st.markdown("### 🍽️ Preferences")
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            allergies = st.text_input("Allergies", placeholder="e.g., peanuts, lactose", key="plan_allergies")
+        with p2:
+            dietary_prefs = st.text_input("Dietary Preferences", placeholder="e.g., Low-Carb, Vegan", key="plan_dietary")
+        with p3:
+            cuisine = st.text_input("Preferred Cuisine", placeholder="e.g., Burmese", key="plan_cuisine")
+        with p4:
+            aversions = st.text_input("Food Aversions", placeholder="e.g., bitter greens", key="plan_aversions")
+
+        # Section: Health Metrics
+        st.markdown("### 🏥 Health Metrics (Optional)")
+        h1, h2, h3, h4 = st.columns(4)
+        with h1:
+            chronic = st.text_input("Chronic Disease", placeholder="e.g., None", key="plan_chronic")
+        with h2:
+            bp = st.text_input("Blood Pressure", placeholder="e.g., Normal", key="plan_bp")
+        with h3:
+            cholesterol = st.text_input("Cholesterol Level", placeholder="e.g., Normal", key="plan_chol")
+        with h4:
+            blood_sugar = st.text_input("Blood Sugar Level", placeholder="e.g., Normal", key="plan_bs")
+
+        # Save preferences action
+        save_col1, save_col2 = st.columns([1, 3])
+        with save_col1:
+            save_prefs = st.button("💾 Save Data", use_container_width=True)
+        if save_prefs:
+            if not st.session_state.user_data:
+                st.error("Please log in to save preferences.")
+            else:
+                prefs = {
+                    "Age": age,
+                    "Gender": gender,
+                    "Height_cm": height,
+                    "Weight_kg": weight,
+                    "BMI": bmi_val,
+                    "Allergies": allergies or "None",
+                    "Daily_Steps": int(steps),
+                    "Sleep_Hours": sleep_hours,
+                    "Current_Goals": health_goal_plan,
+                    "Dietary_Preferences": dietary_prefs or "",
+                    "Exercise_Frequency": activity_level_plan,
+                    "Preferred_Cuisine": cuisine or "",
+                    "Food_Aversions": aversions or "",
+                    "Chronic_Disease": chronic or "",
+                    "Blood_Pressure": bp or "",
+                    "Cholesterol_Level": cholesterol or "",
+                    "Blood_Sugar_Level": blood_sugar or "",
+                }
+                # Attach latest generated plan macros if available
+                macros = st.session_state.get("plan_macros")
+                if isinstance(macros, dict):
+                    prefs["Plan_Macros"] = macros
+                ok = db_manager.save_user_preferences(st.session_state.user_data['id'], prefs)
+                if ok:
+                    st.success("Preferences saved.")
+                else:
+                    st.error("Failed to save preferences.")
+
+        st.divider()
+
+        if st.button("✨ Generate Plan", type="primary"):
+            with st.spinner("Generating personalized plan..."):
+                try:
+                    fields = {
+                        "Age": age,
+                        "Gender": gender,
+                        "Height_cm": height,
+                        "Weight_kg": weight,
+                        "BMI": bmi_val,
+                        "Allergies": allergies or "None",
+                        "Daily_Steps": int(steps),
+                        "Sleep_Hours": sleep_hours,
+                        "Current_Goals": health_goal_plan,
+                        "Dietary_Preferences": dietary_prefs or "",
+                        "Exercise_Frequency": activity_level_plan,
+                        "Preferred_Cuisine": cuisine or "",
+                        "Food_Aversions": aversions or "",
+                        "Chronic_Disease": chronic or "",
+                        "Blood_Pressure": bp or "",
+                        "Cholesterol_Level": cholesterol or "",
+                        "Blood_Sugar_Level": blood_sugar or "",
+                    }
+                    plan_json = get_plan_json(fields)
+                    if isinstance(plan_json, dict) and all(k in plan_json for k in ["calories","protein_g","carbs_g","fats_g","meals"]):
+                        st.success("Plan generated")
+                        st.markdown("### 📋 Suggested Plan")
+                        st.markdown(f"- Calories: {plan_json.get('calories')} kcal")
+                        st.markdown(f"- Protein: {plan_json.get('protein_g')} g")
+                        st.markdown(f"- Carbs: {plan_json.get('carbs_g')} g")
+                        st.markdown(f"- Fats: {plan_json.get('fats_g')} g")
+                        # Save macros to session for later persistence on Save Data
+                        st.session_state.plan_macros = {
+                            "calories": plan_json.get("calories"),
+                            "protein_g": plan_json.get("protein_g"),
+                            "carbs_g": plan_json.get("carbs_g"),
+                            "fat_g": plan_json.get("fats_g"),
+                        }
+                        meals = plan_json.get("meals") or {}
+                        if isinstance(meals, dict):
+                            st.markdown("#### Meals")
+                            st.markdown(f"- Breakfast: {meals.get('breakfast','-')}")
+                            st.markdown(f"- Lunch: {meals.get('lunch','-')}")
+                            st.markdown(f"- Snack: {meals.get('snack','-')}")
+                            st.markdown(f"- Dinner: {meals.get('dinner','-')}")
+                        notes = plan_json.get("notes")
+                        if notes:
+                            st.markdown("#### Notes")
+                            st.markdown(notes)
+                    else:
+                        st.warning("Model did not return structured JSON. Showing raw output.")
+                        st.write(plan_json)
+                except Exception as e:
+                    st.error(f"Plan generation failed: {e}. Ensure MISTRAL_API_KEY is set in your environment.")
+
+    # Tab 3: Meal Analyzer (moved from tab2)
+    with tab3:
         st.header("🍽 Meal Analyzer")
         st.markdown("Analyze your meals for nutrition content and get personalized recommendations")
         
-        col1, col2 = st.columns([2, 1])
+        # col1, col2 = st.columns([2, 1])
         
-        with col1:
-            st.subheader("📝 Meal Description")
-            meal_description = st.text_area(
-                "Describe your meal:",
-                placeholder="e.g., 1 bowl of chicken curry with rice and salad",
-                height=100
-            )
-            
-            st.subheader("📸 Meal Photo")
-            uploaded_file = st.file_uploader(
-                "Upload a photo of your meal (optional)",
-                type=['png', 'jpg', 'jpeg'],
-                help="This will be analyzed by AI in future updates"
-            )
-            
-            if uploaded_file is not None:
-                st.image(uploaded_file, caption="Uploaded meal photo", use_column_width=True)
+        # with col1:
+        st.subheader("📝 Meal Description")
+        meal_description = st.text_area(
+            "Describe your meal(What do you eat today):",
+            placeholder="e.g., 1 bowl of chicken curry with rice and salad",
+            height=100
+        )
         
-        with col2:
-            st.subheader("👤 Personal Information")
-            age = st.number_input("Age", min_value=1, max_value=120, value=25)
-            weight = st.number_input("Weight (kg)", min_value=1.0, max_value=300.0, value=70.0, step=0.1)
-            height = st.number_input("Height (cm)", min_value=50, max_value=250, value=170)
-            
-            gender = st.selectbox("Gender", ["Male", "Female", "Other"])
-            activity_level = st.selectbox(
-                "Activity Level",
-                ["Sedentary", "Lightly Active", "Moderately Active", "Very Active", "Extremely Active"]
-            )
-            
-            st.subheader("🎯 Health Goals")
-            health_goal = st.selectbox(
-                "Primary Goal",
-                ["Weight Loss", "Weight Gain", "Muscle Gain", "Maintenance", "General Health"]
-            )
-            
-            # Health condition inputs for future ML predictions
-            st.subheader("🏥 Health Monitoring")
-            diabetes_risk = st.selectbox("Diabetes Risk Assessment", ["Low", "Medium", "High", "Unknown"])
-            heart_disease_risk = st.selectbox("Heart Disease Risk", ["Low", "Medium", "High", "Unknown"])
+        st.subheader("📸 Meal Photo (coming soon)")
+        uploaded_file = st.file_uploader(
+            "Upload a photo of your meal (optional)",
+            type=['png', 'jpg', 'jpeg'],
+            help="Image upload is disabled for now. Analysis coming soon.",
+            disabled=True
+        )
+        
+        if uploaded_file is not None:
+            st.image(uploaded_file, caption="Uploaded meal photo", use_column_width=True)
+        
         
         st.divider()
         
-        # Analysis button and results
-        if st.button("🔍 Analyze Meal", type="primary"):
+        # Analysis buttons and results
+        btn_col1, btn_col2 = st.columns([1,1])
+        analyze_text = btn_col1.button("🔍 Analyze Text", type="primary")
+        analyze_image = btn_col2.button("🖼️ Analyze Image (coming soon)", disabled=True)
+
+        if analyze_text:
             if meal_description:
-                with st.spinner("Analyzing your meal..."):
-                    # Placeholder analysis results
-                    st.info("🍽️ **Estimated Nutrition:** 500 kcal, 30g protein, 12g fat, 45g carbs, 8g fiber")
-                    st.success("✅ **Recommended Diet:** Low Carb based on your profile")
-                    
-                    # Additional recommendations
-                    st.markdown("### 📋 Personalized Recommendations")
-                    recommendations = [
-                        f"Based on your {health_goal.lower()} goal and {activity_level.lower()} lifestyle:",
-                        "• Consider adding more vegetables for fiber",
-                        "• Your protein intake looks good for muscle maintenance",
-                        "• Try to drink more water with this meal",
-                        f"• This meal fits well with your {diabetes_risk.lower()} diabetes risk profile"
-                    ]
-                    
-                    for rec in recommendations:
-                        st.markdown(rec)
-                    
-                    # Save meal log to database
-                    if st.session_state.user_data:
+                # with st.spinner("Analyzing your meal (text)..."):
+                    # 1) Extract structured ingredients (Mistral -> JSON)
+                    extraction = extract_ingredients_free_text(meal_description)
+                    # Alert if LLM unavailable or errored
+                    if isinstance(extraction, dict):
+                        note = extraction.get("notes", "")
+                        if note in ("llm_unavailable", "llm_error"):
+                            st.error("Text parsing requires Mistral. Please set MISTRAL_API_KEY and try again.")
+                            st.stop()
+                    items = extraction.get("items", []) if isinstance(extraction, dict) else []
+                    if not items:
+                        st.warning("Couldn't parse ingredients. Try listing items with quantities, e.g., '150g chicken, 1 cup rice'.")
+                        st.stop()
+
+                    # 2) Compute nutrition via USDA (if key present) or local fallback
+                    result = compute_nutrition(items)
+                    # Alert if USDA FDC unavailable
+                    if isinstance(result, dict) and result.get("notes") == "fdc_unavailable":
+                        st.error("Nutrition lookup requires USDA FDC. Please set FDC_API_KEY and try again.")
+                        st.stop()
+                    totals = result.get("totals", {})
+                    details = result.get("details", [])
+                    if not details or all(v == 0 for v in totals.values()):
+                        st.warning("No recognizable foods found. Please refine your description.")
+                        st.stop()
+
+                    # 3) Render details per item
+                    st.subheader("🧾 Parsed Ingredients")
+                    rows = []
+                    for d in details:
+                        it = d.get("item", {})
+                        nut = d.get("nutrients", {})
+                        rows.append({
+                            "Item": it.get("name","-"),
+                            "Qty": it.get("quantity","-"),
+                            "Unit": it.get("unit","-"),
+                            "kcal": nut.get("calories",0),
+                            "Protein(g)": nut.get("protein_g",0),
+                            "Carbs(g)": nut.get("carbs_g",0),
+                            "Fat(g)": nut.get("fat_g",0),
+                            "Fiber(g)": nut.get("fiber_g",0),
+                            "Sugar(g)": nut.get("sugar_g",0),
+                        })
+                    st.dataframe(rows, use_container_width=True)
+
+                    # 4) Totals
+                    st.subheader("📊 Estimated Totals")
+                    st.info(
+                        f"Calories: {totals.get('calories',0)} kcal | "
+                        f"Protein: {totals.get('protein_g',0)} g | "
+                        f"Carbs: {totals.get('carbs_g',0)} g | "
+                        f"Fat: {totals.get('fat_g',0)} g | "
+                        f"Fiber: {totals.get('fiber_g',0)} g | "
+                        f"Sugar: {totals.get('sugar_g',0)} g"
+                    )
+
+                    # # 5) Generic recommendations
+                    # st.markdown("### 📋 Recommendations")
+                    # for rec in [
+                    #     "• Consider adding more vegetables for fiber",
+                    #     "• Your protein intake looks good for muscle maintenance",
+                    #     "• Try to drink more water with this meal",
+                    #     "• If monitoring carbs, adjust portion of rice/bread/pasta",
+                    # ]:
+                    #     st.markdown(rec)
+
+                    # 6) Persist
+                    if st.session_state.user_data and details:
                         meal_log_id = db_manager.save_meal_log(
                             st.session_state.user_data['id'],
                             meal_description,
                             uploaded_file.name if uploaded_file else None
                         )
-                        
-                        # Save nutrition analysis
                         db_manager.save_nutrition_analysis(
                             meal_log_id,
-                            calories=500,
-                            protein=30,
-                            carbs=45,
-                            fat=12,
-                            recommendation="Low Carb diet recommended"
+                            calories=totals.get('calories',0),
+                            protein=totals.get('protein_g',0),
+                            carbs=totals.get('carbs_g',0),
+                            fat=totals.get('fat_g',0),
+                            recommendation="Auto-estimated from ingredients",
+                            sugar=totals.get('sugar_g', 0),
+                            fiber=totals.get('fiber_g', 0),
                         )
             else:
                 st.error("Please describe your meal first!")
+
+        if analyze_image:
+            if uploaded_file is None:
+                st.warning("Upload a meal photo first.")
+            else:
+                st.info("Image-based nutrition analysis will be available in a future update.")
+
+        # Removed inline AI Nutrition Plan; now in separate tab
     
-    # Tab 3: Nutrition Dashboard
-    with tab3:
+    # Tab 4: Nutrition Dashboard
+    with tab4:
         st.header("📊 Nutrition Dashboard")
         st.markdown("Visualize your nutrition data and track your progress")
         
@@ -579,39 +789,36 @@ if st.session_state.authenticated:
         st.divider()
         
         # Weekly trend (mock data)
-        st.subheader("📅 Weekly Nutrition Trends")
-        dates = pd.date_range(start='2024-01-01', periods=7, freq='D')
-        weekly_data = pd.DataFrame({
-            'Date': dates,
-            'Calories': [2100, 2200, 1950, 2300, 2000, 2400, 2150],
-            'Protein': [110, 120, 100, 130, 115, 140, 125],
-            'Carbs': [230, 250, 200, 280, 220, 290, 240]
-        })
+        # st.subheader("📅 Weekly Nutrition Trends")
+        # dates = pd.date_range(start='2024-01-01', periods=7, freq='D')
+        # weekly_data = pd.DataFrame({
+        #     'Date': dates,
+        #     'Calories': [2100, 2200, 1950, 2300, 2000, 2400, 2150],
+        #     'Protein': [110, 120, 100, 130, 115, 140, 125],
+        #     'Carbs': [230, 250, 200, 280, 220, 290, 240]
+        # })
         
-        fig_line = px.line(
-            weekly_data,
-            x='Date',
-            y=['Calories', 'Protein', 'Carbs'],
-            title="7-Day Nutrition Trends",
-            markers=True
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
+        # fig_line = px.line(
+        #     weekly_data,
+        #     x='Date',
+        #     y=['Calories', 'Protein', 'Carbs'],
+        #     title="7-Day Nutrition Trends",
+        #     markers=True
+        # )
+        # st.plotly_chart(fig_line, use_container_width=True)
         
         # Nutrition goals progress
         st.subheader("🎯 Goals Progress")
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2 = st.columns(2)
         
         with col1:
             st.metric("Daily Calories", "2,200", "50 under goal")
         with col2:
             st.metric("Protein", "120g", "20g over goal")
-        with col3:
-            st.metric("Water", "2.1L", "0.4L to goal")
-        with col4:
-            st.metric("Steps", "8,500", "1,500 to goal")
+    
     
     # Tab 4: Export Report
-    with tab4:
+    with tab5:
         st.header("📝 Export Report")
         st.markdown("Generate and download comprehensive nutrition reports")
         
@@ -666,11 +873,11 @@ if st.session_state.authenticated:
             """, unsafe_allow_html=True)
 
             # Tab 5: Talk to Me (Voice Interface)
-    with tab5:
+    with tab6:
         st.header("🎙️ Talk to Me")
-        st.markdown(
-            "Have a natural conversation with your nutrition assistant using voice"
-        )
+        # st.markdown(
+        #     "Have a natural conversation with your nutrition assistant using voice"
+        # )
 
         # Voice interface layout
         col1, col2 = st.columns([1, 1])
@@ -838,7 +1045,8 @@ if st.session_state.authenticated:
             - 📱 **Mobile optimized** - Perfect for hands-free nutrition guidance
         """
         )
-
+        
+    # Tab 6: Talk to Me (no additional content here; Talk to Me content is under tab5)
 else:
     # Welcome screen for non-authenticated users
     st.markdown(

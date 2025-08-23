@@ -213,7 +213,8 @@ class DatabaseManager:
             return ""
     
     def save_nutrition_analysis(self, meal_log_id: str, calories: float, protein: float, 
-                               carbs: float, fat: float, recommendation: str) -> bool:
+                               carbs: float, fat: float, recommendation: str, 
+                               sugar: float = 0.0, fiber: float = 0.0) -> bool:
         """Save nutrition analysis results"""
         try:
             if self.engine:
@@ -231,8 +232,8 @@ class DatabaseManager:
                             "protein_g": protein,
                             "carbs_g": carbs,
                             "fat_g": fat,
-                            "sugar_g": 0,  # Placeholder
-                            "fiber_g": 0,  # Placeholder
+                            "sugar_g": sugar,
+                            "fiber_g": fiber,
                             "recommendation": recommendation
                         }
                     )
@@ -247,8 +248,8 @@ class DatabaseManager:
                     'protein_g': protein,
                     'carbs_g': carbs,
                     'fat_g': fat,
-                    'sugar_g': 0,  # Placeholder
-                    'fiber_g': 0,  # Placeholder
+                    'sugar_g': sugar,
+                    'fiber_g': fiber,
                     'recommendation': recommendation,
                     'created_at': datetime.now().isoformat()
                 }
@@ -330,4 +331,95 @@ class DatabaseManager:
             
         except Exception as e:
             st.error(f"Error retrieving nutrition summary: {str(e)}")
+            return {}
+
+    # -------------------------
+    # User Preferences (Nutrition Plan)
+    # -------------------------
+    def _ensure_user_preferences_table(self):
+        """Create user_preferences table if it does not exist (engine-backed only)."""
+        if not self.engine:
+            return
+        with self.engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_preferences (
+                        user_id uuid PRIMARY KEY,
+                        preferences jsonb NOT NULL DEFAULT '{}'::jsonb,
+                        updated_at timestamptz NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.commit()
+
+    def save_user_preferences(self, user_id: str, preferences: Dict) -> bool:
+        """Create or update user preferences in user_preferences table.
+        Expects a JSON-capable column named `preferences` and a unique constraint on user_id.
+        """
+        try:
+            if self.engine:
+                # Ensure table exists
+                self._ensure_user_preferences_table()
+                with self.engine.connect() as conn:
+                    # Postgres upsert on user_id
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO user_preferences (user_id, preferences, updated_at)
+                            VALUES (:user_id, :preferences, NOW())
+                            ON CONFLICT (user_id)
+                            DO UPDATE SET preferences = EXCLUDED.preferences, updated_at = NOW()
+                            """
+                        ),
+                        {
+                            "user_id": user_id,
+                            # Serialize to JSON string for portability across drivers
+                            "preferences": __import__("json").dumps(preferences),
+                        }
+                    )
+                    # Work around JSON binding by sending as string when needed
+                    # If above fails on some drivers, try string dump
+                    conn.commit()
+                    return True
+            else:
+                if 'user_preferences' not in st.session_state:
+                    st.session_state.user_preferences = {}
+                st.session_state.user_preferences[user_id] = preferences
+                return True
+        except Exception as e:
+            st.error(f"Error saving user preferences: {str(e)}")
+            return False
+
+    def get_user_preferences(self, user_id: str) -> Dict:
+        """Fetch user preferences. Returns empty dict if none."""
+        try:
+            if self.engine:
+                # Ensure table exists
+                self._ensure_user_preferences_table()
+                with self.engine.connect() as conn:
+                    res = conn.execute(
+                        text(
+                            """
+                            SELECT preferences
+                            FROM user_preferences
+                            WHERE user_id = :user_id
+                            """
+                        ),
+                        {"user_id": user_id},
+                    )
+                    row = res.fetchone()
+                    if not row:
+                        return {}
+                    prefs = row[0]
+                    # Some drivers return JSON already as dict, others as str
+                    if isinstance(prefs, str):
+                        import json
+                        return json.loads(prefs)
+                    return dict(prefs) if prefs else {}
+            else:
+                return (st.session_state.get('user_preferences') or {}).get(user_id, {})
+        except Exception as e:
+            st.error(f"Error retrieving user preferences: {str(e)}")
             return {}
