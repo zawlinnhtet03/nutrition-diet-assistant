@@ -20,6 +20,9 @@ def render_analyzer_page(db_manager: Any):
         height=100,
     )
 
+    
+    analyze_text = st.button("🔍 Analyze Meal")
+
     st.subheader("📸 Meal Photo")
     uploaded_file = st.file_uploader(
         "Upload a photo of your meal (optional)", type=["png", "jpg", "jpeg"]
@@ -32,11 +35,11 @@ def render_analyzer_page(db_manager: Any):
         except Exception:
             pass
 
-    st.divider()
+    # st.divider()
 
-    btn_col1, btn_col2 = st.columns([1, 1])
-    analyze_text = btn_col1.button("🔍 Analyze Meal", type="primary")
-    analyze_image = btn_col2.button("🖼️ Analyze Image")
+    # btn_col1, btn_col2 = st.columns([1, 1])
+    # analyze_text = btn_col1.button("🔍 Analyze Meal", type="primary")
+    analyze_image = st.button("🖼️ Analyze Image")
 
     if analyze_text:
         if not meal_description:

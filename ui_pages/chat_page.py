@@ -7,6 +7,17 @@ import streamlit as st
 from services.rag_service import init_rag
 from services.agent_service import build_agent
 from components.agent_trace import render_agent_trace
+ 
+# For building an Agent-specific chain with a different LLM
+RAG_SRC = os.path.join(os.path.dirname(__file__), "..", "rag", "src")
+if RAG_SRC not in os.sys.path:
+    os.sys.path.insert(0, RAG_SRC)
+try:
+    from llm_model import get_llm  # type: ignore
+    from rag_chain import build_rag_chain  # type: ignore
+except Exception:
+    get_llm = None  # type: ignore
+    build_rag_chain = None  # type: ignore
 
 # Functions below mirror the logic currently in app.py's Chat tab
 # This file is not wired yet to avoid behavior changes. You can swap it in later.
@@ -132,6 +143,7 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
                 rag_ctx = init_rag(os.path.abspath(cfg_path))
                 st.session_state.qa_chain = rag_ctx["qa_chain"]
                 st.session_state.llm = rag_ctx["llm"]
+                st.session_state.retriever = rag_ctx.get("retriever")
                 st.session_state.rag_initialized = True
             except Exception as e:
                 st.session_state.rag_error = str(e)
@@ -196,11 +208,24 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
 
                 original_query = prompt
                 if current_mode == "Agent":
+                    # Build or reuse an Agent-specific chain using a separate LLM model
+                    if get_llm is None or build_rag_chain is None:
+                        raise RuntimeError("Agent mode requires llm_model and rag_chain modules.")
+                    if not st.session_state.get("agent_chain"):
+                        retriever = st.session_state.get("retriever")
+                        if retriever is None:
+                            raise RuntimeError("Retriever not available for Agent mode.")
+                        agent_model = os.getenv("AGENT_LLM_MODEL", "google/gemini-2.5-flash-lite")
+                        agent_llm = get_llm(model_name=agent_model)
+                        st.session_state.agent_chain = build_rag_chain(
+                            llm=agent_llm,
+                            retriever=retriever,
+                            chain_type="stuff",
+                            return_source_documents=True,
+                        )
                     if not st.session_state.get("agent_orchestrator"):
-                        if st.session_state.qa_chain is None:
-                            raise RuntimeError("RAG must be initialized for Agent mode.")
                         st.session_state.agent_orchestrator = build_agent(
-                            st.session_state.qa_chain,
+                            st.session_state.agent_chain,
                             st.session_state.get("extract_ingredients_fn") or (lambda x: {"items": [], "notes": "llm_unavailable"}),
                             st.session_state.get("compute_nutrition_fn") or (lambda items: {"totals": {}, "details": []}),
                         )

@@ -172,6 +172,40 @@ def render_plan_page(db_manager):
                     k in plan_json for k in ["calories", "protein_g", "carbs_g", "fats_g", "meals"]
                 ):
                     st.success("Plan generated")
+                    # st.info("Save this plan to enable personalized answers in Chat.")
+                    # if st.button("💾 Save This Plan", key="save_after_plan"):
+                    #     if not st.session_state.user_data:
+                    #         st.error("Please log in to save preferences.")
+                    #     else:
+                    #         prefs = {
+                    #             "Age": age,
+                    #             "Gender": gender,
+                    #             "Height_cm": height,
+                    #             "Weight_kg": weight,
+                    #             "BMI": bmi_val,
+                    #             "Allergies": allergies or "None",
+                    #             "Daily_Steps": int(steps),
+                    #             "Sleep_Hours": sleep_hours,
+                    #             "Current_Goals": health_goal_plan,
+                    #             "Dietary_Preferences": dietary_prefs or "",
+                    #             "Exercise_Frequency": activity_level_plan,
+                    #             "Preferred_Cuisine": cuisine or "",
+                    #             "Food_Aversions": aversions or "",
+                    #             "Chronic_Disease": chronic or "",
+                    #             "Blood_Pressure": bp or "",
+                    #             "Cholesterol_Level": cholesterol or "",
+                    #             "Blood_Sugar_Level": blood_sugar or "",
+                    #         }
+                    #         macros = st.session_state.get("plan_macros")
+                    #         if isinstance(macros, dict):
+                    #             prefs["Plan_Macros"] = macros
+                    #         ok = db_manager.save_user_preferences(
+                    #             st.session_state.user_data["id"], prefs
+                    #         )
+                    #         if ok:
+                    #             st.success("Saved. Your chat will be personalized using this plan.")
+                    #         else:
+                    #             st.error("Failed to save preferences.")
                     st.markdown("### 📋 Suggested Plan")
                     st.markdown(f"- Calories: {plan_json.get('calories')} kcal")
                     st.markdown(f"- Protein: {plan_json.get('protein_g')} g")
