@@ -5,8 +5,6 @@ import json
 import streamlit as st
 
 from services.rag_service import init_rag
-from services.agent_service import build_agent
-from components.agent_trace import render_agent_trace
  
 # For building an Agent-specific chain with a different LLM
 RAG_SRC = os.path.join(os.path.dirname(__file__), "..", "rag", "src")
@@ -77,7 +75,12 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
                 label = f"{'🟢 ' if is_current else '💬 '}{title[:25]}" + (
                     "..." if len(title) > 25 else ""
                 )
-                badge = " [Coach]" if category == "User Coach" else " [RAG]"
+                if category == "User Coach":
+                    badge = " [Coach]"
+                elif category == "Agent":
+                    badge = " [Agent]"
+                else:
+                    badge = " [RAG]"
                 if st.button(
                     label + badge,
                     key=f"session_{session_id}",
@@ -195,44 +198,49 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
         with st.spinner("Thinking..."):
             assistant_response = ""
             try:
-                if st.session_state.qa_chain is None:
-                    raise RuntimeError(
-                        "RAG is not initialized. Check your GOOGLE_API_KEY and vector store."
-                    )
-                # Determine session mode (category)
+                # Determine session mode (category) first
                 current_mode = "RAG Q&A"
                 for s in st.session_state.chat_sessions or []:
                     if s.get("id") == st.session_state.current_session_id:
                         current_mode = s.get("category") or "RAG Q&A"
                         break
+                # Only require RAG init for non-Agent modes
+                if current_mode != "Agent" and st.session_state.qa_chain is None:
+                    raise RuntimeError(
+                        "RAG is not initialized. Check your OpenRouter LLM and vector store."
+                    )
 
                 original_query = prompt
                 if current_mode == "Agent":
-                    # Build or reuse an Agent-specific chain using a separate LLM model
-                    if get_llm is None or build_rag_chain is None:
-                        raise RuntimeError("Agent mode requires llm_model and rag_chain modules.")
-                    if not st.session_state.get("agent_chain"):
-                        retriever = st.session_state.get("retriever")
-                        if retriever is None:
-                            raise RuntimeError("Retriever not available for Agent mode.")
+                    # Rewritten Agent mode: pure LLM responder that always answers in Burmese.
+                    if get_llm is None:
+                        raise RuntimeError("Agent mode requires llm_model module.")
+                    if not st.session_state.get("agent_llm"):
                         agent_model = os.getenv("AGENT_LLM_MODEL", "google/gemini-2.5-flash-lite")
-                        agent_llm = get_llm(model_name=agent_model)
-                        st.session_state.agent_chain = build_rag_chain(
-                            llm=agent_llm,
-                            retriever=retriever,
-                            chain_type="stuff",
-                            return_source_documents=True,
-                        )
-                    if not st.session_state.get("agent_orchestrator"):
-                        st.session_state.agent_orchestrator = build_agent(
-                            st.session_state.agent_chain,
-                            st.session_state.get("extract_ingredients_fn") or (lambda x: {"items": [], "notes": "llm_unavailable"}),
-                            st.session_state.get("compute_nutrition_fn") or (lambda items: {"totals": {}, "details": []}),
-                        )
-                    agent = st.session_state.agent_orchestrator
-                    agent_out = agent.run(original_query)
-                    assistant_response = agent_out.get("answer", "")
-                    st.session_state.last_agent_trace = agent_out.get("trace", [])
+                        st.session_state.agent_llm = get_llm(model_name=agent_model)
+                    # Detect Myanmar script
+                    def _is_mm(text: str) -> bool:
+                        try:
+                            return any(0x1000 <= ord(ch) <= 0x109F or 0xAA60 <= ord(ch) <= 0xAA7F for ch in text)
+                        except Exception:
+                            return False
+                    is_mm = _is_mm(original_query)
+                    # Compose a direct instruction to always answer in Burmese
+                    system_prefix = (
+                        "အသုံးပြုသူ၏ မေးခွန်းကို မြန်မာဘာသာဖြင့်သာ ပြန်လည်ဖြေကြားပါ။ နေ့စဉ် အာဟာရ/စားစရာ အကြံပြုရန် တောင်းခံပါက ၂–၃ မျိုး အကြံပြုပြီး ကယ်လိုရီ/ပရိုတင်း/ကာဗို/အဆီ ခန့်မှန်းချက်ကို ရိုးရှင်းစွာ ထည့်သွင်းဖော်ပြပါ။ "
+                    )
+                    prompt_text = f"{system_prefix}\nမေးခွန်း: {original_query}"
+                    resp = st.session_state.agent_llm.invoke(prompt_text)
+                    assistant_response = resp.content if (hasattr(resp, "content") and resp.content) else str(resp)
+                    assistant_response = assistant_response.strip()
+                    # If the user typed non-Burmese, still translate to Burmese
+                    if not is_mm:
+                        try:
+                            trans = st.session_state.agent_llm.invoke("Translate the following answer to natural Burmese. Keep numbers/units unchanged.\n" + assistant_response)
+                            tr = trans.content if (hasattr(trans, "content") and trans.content) else str(trans)
+                            assistant_response = (tr or assistant_response).strip()
+                        except Exception:
+                            pass
                     result = {"result": assistant_response, "source_documents": []}
                 elif current_mode == "User Coach":
                     # Fetch user preferences
@@ -279,36 +287,38 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
                 )
 
                 # Fallback: if no sources, provide a brief general answer
-                source_docs = []
-                if isinstance(result, dict):
-                    source_docs = result.get("source_documents") or []
-                if not source_docs:
-                    try:
-                        llm = st.session_state.get("llm")
-                        if llm is None:
-                            raise RuntimeError("LLM not available for fallback.")
-                        if current_mode == "User Coach":
-                            brief_prompt = (
-                                "Answer in ONE short sentence tailored to the USER PROFILE. "
-                                f"USER PROFILE: {prefs_json if 'prefs_json' in locals() else '{}'}\n"
-                                f"Question: {prompt}"
+                # Skip this note and fallback message in Agent mode to avoid confusing UX
+                if current_mode != "Agent":
+                    source_docs = []
+                    if isinstance(result, dict):
+                        source_docs = result.get("source_documents") or []
+                    if not source_docs:
+                        try:
+                            llm = st.session_state.get("llm")
+                            if llm is None:
+                                raise RuntimeError("LLM not available for fallback.")
+                            if current_mode == "User Coach":
+                                brief_prompt = (
+                                    "Answer in ONE short sentence tailored to the USER PROFILE. "
+                                    f"USER PROFILE: {prefs_json if 'prefs_json' in locals() else '{}'}\n"
+                                    f"Question: {prompt}"
+                                )
+                            else:
+                                brief_prompt = (
+                                    "Answer in ONE short, direct sentence (<=20 words). "
+                                    f"Question: {prompt}"
+                                )
+                            generic = llm.invoke(brief_prompt)
+                            assistant_response = (
+                                generic.content if (hasattr(generic, "content") and generic.content) else str(generic)
                             )
-                        else:
-                            brief_prompt = (
-                                "Answer in ONE short, direct sentence (<=20 words). "
-                                f"Question: {prompt}"
-                            )
-                        generic = llm.invoke(brief_prompt)
-                        assistant_response = (
-                            generic.content if (hasattr(generic, "content") and generic.content) else str(generic)
-                        )
-                        assistant_response = assistant_response.strip().split("\n")[0]
-                        if "." in assistant_response:
-                            assistant_response = assistant_response.split(".")[0] + "."
-                        assistant_response = assistant_response[:200]
-                        assistant_response += "\n\n(Note: No relevant documents were found; this is a brief general answer.)"
-                    except Exception as e_fallback:
-                        assistant_response = f"RAG returned no sources and fallback failed: {e_fallback}"
+                            assistant_response = assistant_response.strip().split("\n")[0]
+                            if "." in assistant_response:
+                                assistant_response = assistant_response.split(".")[0] + "."
+                            assistant_response = assistant_response[:200]
+                            assistant_response += "\n\n(Note: No relevant documents were found; this is a brief general answer.)"
+                        except Exception as e_fallback:
+                            assistant_response = f"RAG returned no sources and fallback failed: {e_fallback}"
             except Exception as e:
                 assistant_response = f"RAG error: {e}"
 
@@ -320,6 +330,4 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
             )
             st.rerun()
 
-        if st.session_state.get("chat_mode") == "Agent":
-            trace = st.session_state.get("last_agent_trace") or []
-            render_agent_trace(trace)
+        # No agent trace rendering in simplified Agent mode

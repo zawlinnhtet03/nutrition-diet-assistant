@@ -17,12 +17,36 @@ class AgentOrchestrator:
     def plan(self, query: str) -> List[Dict[str, Any]]:
         """
         Simple planner: choose a single tool based on the query.
-        - If nutrition calculation terms present -> macro_calculator
+        - If nutrition calculation terms present (English or Burmese) -> macro_calculator
         - Else -> retrieval (RAG)
         """
         q = (query or "").lower()
+        # Detect Myanmar script
+        def _is_mm(text: str) -> bool:
+            try:
+                return any(0x1000 <= ord(ch) <= 0x109F or 0xAA60 <= ord(ch) <= 0xAA7F for ch in text)
+            except Exception:
+                return False
+        is_mm = _is_mm(query or "")
+
+        # Heuristics for macro/suggestion intents
+        en_nutrition_terms = ["calorie", "calories", "protein", "carb", "fat", "fiber", "macro"]
+        en_quant_terms = ["how much", "how many", "per 100g", "per serving", "estimate", "calculate", "under", "at least", ">=", "<=", "g "]
+        mm_nutrition_terms = ["ကယ်လိုရီ", "ပရိုတင်း", "ကာဗိုဟိုက်ဒရိတ်", "အဆီ", "မက်ခရို", "အာဟာရ"]
+        mm_action_terms = ["တွက်", "တွက်ချက်", "ခန့်မှန်း", "ရအောင်", "အောက်", "အနည်းဆုံး", "စံထားချက်", "ပန်းတိုင်"]
+        mm_meal_terms = ["ဟင်း", "မီနူး", "အကြံပြု", "နံနက်စာ", "နေ့လည်စာ", "ညစာ", "အစားအသောက်"]
+
+        def any_in(words, text):
+            return any(w in text for w in words)
+
+        wants_macros = False
+        if any_in(en_nutrition_terms, q) and (any_in(en_quant_terms, q) or any(ch.isdigit() for ch in q)):
+            wants_macros = True
+        if is_mm and (any_in(mm_nutrition_terms, q) or any_in(mm_meal_terms, q)) and (any_in(mm_action_terms, q) or any(ch.isdigit() for ch in q)):
+            wants_macros = True
+
         steps: List[Dict[str, Any]] = []
-        if any(k in q for k in ["calorie", "calories", "protein", "carb", "fat", "fiber"]) and any(k in q for k in ["how much", "how many", "per 100g", "per serving"]):
+        if wants_macros:
             steps.append({"tool": "macro_calculator", "input": {"query": query}})
         else:
             steps.append({"tool": "retrieval", "input": {"query": query}})
@@ -46,7 +70,13 @@ class AgentOrchestrator:
         tool = last.get("tool")
         data = last.get("result")
         if tool == "retrieval":
-            return data.get("text") or data.get("answer") or ""
+            # If retrieval returned zero sources, allow upstream caller to handle fallback
+            try:
+                if (data or {}).get("source_count", 0) == 0:
+                    return ""
+            except Exception:
+                pass
+            return (data or {}).get("text") or (data or {}).get("answer") or ""
         if tool == "macro_calculator":
             totals = (data or {}).get("totals") or {}
             if totals:
@@ -64,6 +94,14 @@ class AgentOrchestrator:
 
         results: List[Dict[str, Any]] = []
         for s in steps:
+            # Gracefully handle missing tools (e.g., retrieval not available)
+            tool_name = s.get("tool")
+            if tool_name not in self.tools:
+                trace.append({
+                    "type": "note",
+                    "note": f"Skipped '{tool_name}' step because the tool is not available (running without retrieval)."
+                })
+                continue
             try:
                 out = self.act(s)
                 results.append(out)
