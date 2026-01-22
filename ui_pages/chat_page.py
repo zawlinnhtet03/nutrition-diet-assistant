@@ -21,7 +21,7 @@ except Exception:
 # This file is not wired yet to avoid behavior changes. You can swap it in later.
 
 def render_chat_page(db_manager: Any, chat_manager: Any):
-    """Render the Ask Anything page (RAG Q&A, User Coach, Agent).
+    """Render the Ask Anything page (General, User Coach, Agent).
     NOTE: Not used yet. Call from app.py when ready to migrate.
     """
     col1, col2 = st.columns([0.6, 3.4], gap="medium")
@@ -29,10 +29,10 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
     with col1:
         st.subheader("💬 Chat Sessions")
         if "chat_mode" not in st.session_state:
-            st.session_state.chat_mode = "RAG Q&A"
+            st.session_state.chat_mode = "General"
         st.radio(
             "Mode",
-            options=["RAG Q&A", "User Coach", "Agent"],
+            options=["General", "User Coach", "Agent"],
             horizontal=True,
             key="chat_mode",
         )
@@ -69,7 +69,7 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
             for session in st.session_state.chat_sessions:
                 session_id = session["id"]
                 title = session["title"]
-                category = session.get("category") or "RAG Q&A"
+                category = session.get("category") or "General"
                 is_current = session_id == st.session_state.current_session_id
                 button_type = "primary" if is_current else "secondary"
                 label = f"{'🟢 ' if is_current else '💬 '}{title[:25]}" + (
@@ -80,7 +80,7 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
                 elif category == "Agent":
                     badge = " [Agent]"
                 else:
-                    badge = " [RAG]"
+                    badge = " [General]"
                 if st.button(
                     label + badge,
                     key=f"session_{session_id}",
@@ -199,10 +199,10 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
             assistant_response = ""
             try:
                 # Determine session mode (category) first
-                current_mode = "RAG Q&A"
+                current_mode = "General"
                 for s in st.session_state.chat_sessions or []:
                     if s.get("id") == st.session_state.current_session_id:
-                        current_mode = s.get("category") or "RAG Q&A"
+                        current_mode = s.get("category") or "General"
                         break
                 # Only require RAG init for non-Agent modes
                 if current_mode != "Agent" and st.session_state.qa_chain is None:
@@ -266,7 +266,7 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
 
                     # Then create the coach-specific prompt with user profile
                     coach_preamble = (
-                        "You are a personal nutrition coach for this user. Use the USER PROFILE JSON below together with retrieved documents. "
+                        "You are a personal nutrition coach for this user.                  Use the USER PROFILE JSON below together with retrieved documents. "
                         "Prioritize user's constraints (allergies, preferences, goals). Be concise and actionable.\n"
                         f"USER PROFILE: {prefs_json}\n"
                     )
@@ -316,7 +316,7 @@ def render_chat_page(db_manager: Any, chat_manager: Any):
                             if "." in assistant_response:
                                 assistant_response = assistant_response.split(".")[0] + "."
                             assistant_response = assistant_response[:200]
-                            assistant_response += "\n\n(Note: No relevant documents were found; this is a brief general answer.)"
+                            # assistant_response += "\n\n(Note: No relevant documents were found; this is a brief general answer.)"
                         except Exception as e_fallback:
                             assistant_response = f"RAG returned no sources and fallback failed: {e_fallback}"
             except Exception as e:

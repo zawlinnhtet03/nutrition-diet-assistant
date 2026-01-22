@@ -302,7 +302,7 @@ else:
                     <h4>✨ Features</h4>
                 </div>
                 <p>  
-                    🧠 Ask Anything: RAG Q&A, User Coach, and Agent with trace
+                    🧠 Ask Anything: General, User Coach, and Agent with trace
                     <br><br>⚖️ Personalized Plan: daily macros and meal suggestions from your profile  
                     <br><br>🍽️ Meal Analyzer: parse free‑text or photo; nutrition via USDA FDC 
                     <br><br>📊 Dashboard: today’s intake vs targets and macro breakdown

@@ -2,7 +2,6 @@ app_name: "Gemini RAG for Nutrion"
 
 gemini:
   llm_model: "meta-llama/llama-3.3-70b-instruct:free"
-  # llm_model: "google/gemini-2.5-flash-lite"
   embedding_model: "openai/text-embedding-3-small"
 
 data_ingestion:
